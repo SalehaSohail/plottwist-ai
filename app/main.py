@@ -4,15 +4,19 @@ from pydantic import BaseModel, Field
 
 from app.retriever import load_model
 from app.vector_store import EvidenceVectorStore
+from app.llm import generate_answer
+
+from ollama import ResponseError
+from httpx import ConnectError
 
 
 app = FastAPI(
     title="PlotTwist AI",
-    description="AI-powered detective evidence retrieval API",
-    version="0.2.0"
+    description="AI-powered detective assistant using RAG",
+    version="0.3.0"
 )
 
-# Load embedding model once
+# Load the embedding model once
 model = load_model()
 
 # Initialize persistent vector database
@@ -42,11 +46,8 @@ def health():
 
 @app.post("/documents")
 async def upload_document(file: UploadFile = File(...)):
-
-    # Read uploaded document
     content = await file.read()
 
-    # Decode UTF-8 text
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -97,20 +98,34 @@ def ask_question(request: QuestionRequest):
             detail="Question cannot be empty."
         )
 
-    if vector_store.count_evidence() == 0:
-        return {
-            "question": request.question,
-            "message": "No evidence uploaded yet.",
-            "results": []
-        }
-
-    # Retrieve evidence from ChromaDB
-    results = vector_store.search_evidence(
+    # Step 1: Retrieve relevant evidence
+    evidence = vector_store.search_evidence(
         question=request.question,
         top_k=request.top_k
     )
 
+    if not evidence:
+        return {
+            "question": request.question,
+            "answer": "There is not enough evidence to answer this question.",
+            "results": []
+        }
+
+    # Step 2: Generate an answer using the local LLM
+    try:
+        answer = generate_answer(
+            question=request.question,
+            evidence=evidence
+        )
+    except (ConnectError, ResponseError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Ollama is unavailable: {error}"
+        )
+
+    # Step 3: Return the answer and its supporting evidence
     return {
         "question": request.question,
-        "results": results
+        "answer": answer,
+        "results": evidence
     }
